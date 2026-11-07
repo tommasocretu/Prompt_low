@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple Platformer - v4</title>
+    <style>
+        body {
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background: #2a2a3a;
+            font-family: monospace;
+        }
+        canvas {
+            border: 2px solid #444;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-size: 14px;
+            background: rgba(0,0,0,0.7);
+            padding: 8px 12px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="640" height="480"></canvas>
+    <div id="info">Arrow Keys / WASD to move · Space/Up to jump · R to restart</div>
+
+<script>
+// === CONSTANTS ===
+const CANVAS_W = 640;
+const CANVAS_H = 480;
+const GRAVITY = 0.5;
+const JUMP_FORCE = -12;
+const MOVE_SPEED = 5;
+const ACCEL = 0.8;
+const FRICTION = 0.85;
+const TILE_SIZE = 32;
+
+// === INPUT HANDLER ===
+class Input {
+    constructor() {
+        this.keys = {};
+        window.addEventListener('keydown', e => {
+            this.keys[e.code] = true;
+            if (e.code === 'Space' || e.code === 'ArrowUp') e.preventDefault();
+        });
+        window.addEventListener('keyup', e => this.keys[e.code] = false);
+    }
+
+    isDown(code) { return !!this.keys[code]; }
+
+    getLeft() { return this.isDown('ArrowLeft') || this.isDown('KeyA'); }
+    getRight() { return this.isDown('ArrowRight') || this.isDown('KeyD'); }
+    getJump() { return this.isDown('Space') || this.isDown('ArrowUp') || this.isDown('KeyW'); }
+}
+
+// === PLAYER CLASS ===
+class Player {
+    constructor(x, y) {
+        this.x = x;
+        this.y = y;
+        this.width = 24;
+        this.height = 32;
+        this.vx = 0;
+        this.vy = 0;
+        this.grounded = false;
+        this.facingRight = true;
+
+        // Animation state
+        this.stretchY = 1.0;    // Vertical stretch factor (0.7 = squashed, 1.3 = stretched)
+        this.stretchX = 1.0;    // Horizontal stretch factor
+        this.targetStretchY = 1.0;
+        this.targetStretchX = 1.0;
+        this.animSpeed = 0.2;   // How fast animation transitions to target
+    }
+
+    update(input, platforms) {
+        if (input.getLeft()) {
+            this.vx -= ACCEL;
+            this.facingRight = false;
+        }
+        if (input.getRight()) {
+            this.vx += ACCEL;
+            this.facingRight = true;
+        }
+
+        this.vx = Math.max(-MOVE_SPEED, Math.min(MOVE_SPEED, this.vx));
+        this.vx *= FRICTION;
+
+        // Animate stretch toward target
+        this.stretchY += (this.targetStretchY - this.stretchY) * this.animSpeed;
+        this.stretchX += (this.targetStretchX - this.stretchX) * this.animSpeed;
+
+        if (input.getJump() && this.grounded) {
+            this.vy = JUMP_FORCE;
+            this.grounded = false;
+            // Stretch when jumping up
+            this.targetStretchY = 0.7;
+            this.targetStretchX = 1.3;
+        } else if (!this.grounded) {
+            // Snap back to normal as we fall
+            this.targetStretchY += (1.0 - this.targetStretchY) * 0.3;
+            this.targetStretchX += (1.0 - this.targetStretchX) * 0.3;
+        } else {
+            // On ground, stretch horizontally when moving
+            if (Math.abs(this.vx) > 0.5) {
+                this.targetStretchY = 0.9;
+                this.targetStretchX = 1.1 + Math.abs(this.vx) * 0.02;
+            } else {
+                this.targetStretchY = 1.0;
+                this.targetStretchX = 1.0;
+            }
+        }
+
+        // Apply gravity
+        this.vy += GRAVITY;
+
+        // Move and check collision (horizontal first, then vertical)
+        this.x += this.vx;
+        this.resolveCollision(platforms, 'x');
+        this.y += this.vy;
+        this.grounded = false;
+        this.resolveCollision(platforms, 'y');
+
+        // Squash when landing
+        if (!this.grounded && this.vy < -3) { // Just landed from a jump
+            this.targetStretchY = 1.2;
+            this.targetStretchX = 0.9;
+            setTimeout(() => {
+                this.targetStretchY = 1.0;
+                this.targetStretchX = 1.0;
+            }, 100);
+        }
+    }
+
+    resolveCollision(platforms, axis) {
+        for (const p of platforms) {
+            if (this.rectIntersects(this.x, this.y, this.width, this.height, p.x, p.y, p.w, p.h)) {
+                if (axis === 'x') {
+                    if (this.vx > 0) this.x = p.x - this.width;
+                    else if (this.vx < 0) this.x = p.x + p.w;
+                    this.vx = 0;
+                } else {
+                    const isOneWay = p.oneWay && this.vy >= 0;
+
+                    if (!isOneWay || this.vy < 0) {
+                        if (this.vy > 0) {
+                            this.y = p.y - this.height;
+                            this.grounded = true;
+                        } else if (this.vy < 0) {
+                            this.y = p.y + p.h;
+                        }
+                        this.vy = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    rectIntersects(x1, y1, w1, h1, x2, y2, w2, h2) {
+        return x1 < x2 + w2 && x1 + w1 > x2 && y1 < y2 + h2 && y1 + h1 > y2;
+    }
+
+    draw(ctx) {
+        const centerX = this.x + this.width / 2;
+        const centerY = this.y + this.height / 2;
+        
+        // Scale from center with animation
+        ctx.save();
+        ctx.translate(centerX, centerY);
+        ctx.scale(this.stretchX, this.stretchY);
+        ctx.translate(-centerX, -centerY);
+
+        // Main body
+        ctx.fillStyle = '#4CAF50';
+        ctx.fillRect(this.x, this.y, this.width, this.height);
+        
+        // Eyes (still drawn in original space)
+        ctx.fillStyle = 'white';
+        const eyeOffset = this.facingRight ? 10 : 2;
+        ctx.fillRect(this.x + eyeOffset, this.y + 8, 6, 6);
+        if (this.facingRight) {
+            ctx.fillRect(this.x + eyeOffset + 3, this.y + 8, 6, 6);
+        } else {
+            ctx.fillRect(this.x + eyeOffset - 3, this.y + 8, 6, 6);
+        }
+
+        // Pupils
+        ctx.fillStyle = '#000';
+        const pupilOffset = this.facingRight ? 2 : -1;
+        ctx.fillRect(this.x + eyeOffset + pupilOffset, this.y + 9, 3, 3);
+        if (this.facingRight) {
+            ctx.fillRect(this.x + eyeOffset + pupilOffset + 4, this.y + 9, 3, 3);
+        } else {
+            ctx.fillRect(this.x + eyeOffset + pupilOffset - 2, this.y + 9, 3, 3);
+        }
+
+        // Feet
+        ctx.fillStyle = '#8D6E63';
+        const footY = this.y + this.height * this.stretchY;
+        const footX1 = this.x + (this.facingRight ? 4 : 0);
+        const footX2 = this.x + (this.facingRight ? this.width - 4 : 0);
+        ctx.fillRect(footX1, footY, 6, 3 * this.stretchY);
+        ctx.fillRect(footX2, footY, 6, 3 * this.stretchY);
+
+        ctx.restore();
+    }
+}
+
+// === PLATFORM CLASS ===
+class Platform {
+    constructor(x, y, w, h, oneWay = false) {
+        this.x = x;
+        this.y = y;
+        this.w = w;
+        this.h = h;
+        this.oneWay = oneWay;
+    }
+
+    draw(ctx) {
+        ctx.fillStyle = this.oneWay ? '#ff9800' : '#888';
+        ctx.fillRect(this.x, this.y, this.w, this.h);
+        
+        // Top surface highlight
+        ctx.fillStyle = this.oneWay ? '#ffc107' : '#aaa';
+        ctx.fillRect(this.x, this.y, this.w, 4);
+
+        if (this.oneWay) {
+            ctx.strokeStyle = 'rgba(255,152,0,0.3)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([4, 4]);
+            ctx.strokeRect(this.x + 2, this.y + 2, this.w - 4, this.h - 4);
+            ctx.setLineDash([]);
+        }
+    }
+}
+
+// === LEVEL CLASS ===
+class Level {
+    constructor(name, width, height) {
+        this.name = name;
+        this.width = width;
+        this.height = height;
+        this.platforms = [];
+        this.playerStart = null;
+        this.flagX = 0;
+        this.flagY = 0;
+        this.build();
+    }
+
+    build() {
+        this.addPlatform(0, CANVAS_H - TILE_SIZE * 2, CANVAS_W, TILE_SIZE);
+        
+        if (this.width === CANVAS_W) {
+            // Level 1: Simple setup
+            this.addPlatform(150, CANVAS_H - TILE_SIZE * 3, 80, TILE_SIZE);
+            this.addPlatform(250, CANVAS_H - TILE_SIZE * 4, 60, TILE_SIZE);
+            this.addPlatform(320, CANVAS_H - TILE_SIZE * 5, 100, TILE_SIZE);
+            this.flagX = CANVAS_W - 60;
+        } else {
+            // Level 2: With gaps and one-way platforms
+            this.addPlatform(150, CANVAS_H - TILE_SIZE * 3, 80, TILE_SIZE);
+            this.addPlatform(280, CANVAS_H - TILE_SIZE * 4, 60, TILE_SIZE, true); // One-way!
+            this.addPlatform(250, CANVAS_H - TILE_SIZE * 5, 100, TILE_SIZE);
+            this.addPlatform(380, CANVAS_H - TILE_SIZE * 5, 60, TILE_SIZE);
+            this.addPlatform(470, CANVAS_H - TILE_SIZE * 6, 80, TILE_SIZE, true); // One-way!
+            this.flagX = CANVAS_W - 60;
+        }
+    }
+
+    addPlatform(x, y, w, h, oneWay) {
+        this.platforms.push(new Platform(x, y, w, h, oneWay || false));
+    }
+
+    draw(ctx) {
+        for (const p of this.platforms) {
+            p.draw(ctx);
+        }
+        
+        // Flag
+        ctx.fillStyle = '#f44336';
+        ctx.fillRect(this.flagX, this.flagY - 20, 10, 20);
+        
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(this.flagX + 5, this.flagY);
+        ctx.lineTo(this.flagX + 5, this.flagY - 30);
+        ctx.stroke();
+
+        ctx.fillStyle = '#f44336';
+        ctx.beginPath();
+        ctx.moveTo(this.flagX + 10, this.flagY - 20);
+        ctx.lineTo(this.flagX + 25, this.flagY - 10);
+        ctx.lineTo(this.flagX + 10, this.flagY);
+        ctx.fill();
+
+        // Player start marker
+        ctx.fillStyle = '#666';
+        ctx.font = '10px monospace';
+        ctx.fillText('Start', this.playerStart.x - 5, this.playerStart.y + CANVAS_H - TILE_SIZE * 2 + 15);
+    }
+
+    getPlatforms() { return this.platforms; }
+}
+
+// === GAME CLASS ===
+class Game {
+    constructor(canvas) {
+        this.canvas = canvas;
+        this.ctx = canvas.getContext('2d');
+        this.input = new Input();
+        this.player = null;
+        this.currentLevel = null;
+        this.state = 'menu'; // menu, playing, levelComplete, gameOver
+        this.levelIndex = 0;
+
+        window.addEventListener('keydown', () => {
+            if (this.input.keys['KeyR'] && this.state !== 'menu') {
+                this.startLevel(this.levelIndex);
+            }
+        });
+
+        this.state = 'menu';
+    }
+
+    startLevel(levelIdx) {
+        this.levelIndex = levelIdx;
+        
+        let width = CANVAS_W;
+        if (levelIdx === 1) width = 960;
+        
+        this.currentLevel = new Level(`Level ${levelIdx + 1}`, width, CANVAS_H);
+        this.player = new Player(40, CANVAS_H - TILE_SIZE * 3);
+        this.state = 'playing';
+    }
+
+    update() {
+        if (this.state === 'menu') return;
+
+        if (this.state !== 'playing' && this.state !== 'levelComplete') return;
+
+        if (this.player) {
+            this.player.update(this.input, this.currentLevel.getPlatforms());
+            
+            // Check win condition
+            const dx = Math.abs(this.player.x - this.currentLevel.flagX);
+            const dy = Math.abs(this.player.y - this.currentLevel.flagY);
+            if (dx < 30 && dy < 20) {
+                this.state = 'levelComplete';
+            }
+        }
+    }
+
+    draw() {
+        this.ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+        
+        // Ground
+        this.ctx.fillStyle = '#222';
+        this.ctx.fillRect(0, CANVAS_H - TILE_SIZE * 2, CANVAS_W, TILE_SIZE * 2);
+
+        if (this.state === 'playing' || this.state === 'levelComplete') {
+            if (this.currentLevel && this.player) {
+                this.currentLevel.draw(this.ctx);
+                this.player.draw(this.ctx);
+                
+                if (this.state === 'levelComplete') {
+                    this.ctx.fillStyle = '#4CAF50';
+                    this.ctx.font = '32px monospace';
+                    this.ctx.textAlign = 'center';
+                    this.ctx.fillText('★ LEVEL COMPLETE ★', CANVAS_W / 2, CANVAS_H / 2);
+                    
+                    this.ctx.fillStyle = '#ccc';
+                    this.ctx.font = '16px monospace';
+                    this.ctx.fillText('Press SPACE to continue', CANVAS_W / 2, CANVAS_H / 2 + 30);
+                }
+            }
+        } else if (this.state === 'menu') {
+            this.ctx.fillStyle = '#4CAF50';
+            this.ctx.font = '48px monospace';
+            this.ctx.textAlign = 'center';
+            this.ctx.fillText('PLATFORMER', CANVAS_W / 2, CANVAS_H / 2 - 30);
+            
+            this.ctx.fillStyle = '#ccc';
+            this.ctx.font = '16px monospace';
+            this.ctx.fillText('Arrow Keys / WASD to move · Space/Up to jump', CANVAS_W / 2, CANVAS_H / 2 + 20);
+        }
+    }
+
+    run() {
+        const loop = () => {
+            this.update();
+            this.draw();
+            
+            if (this.state === 'levelComplete' && this.input.keys['Space']) {
+                if (this.levelIndex < 1) {
+                    this.startLevel(this.levelIndex + 1);
+                } else {
+                    this.showGameOver();
+                }
+            }
+            
+            requestAnimationFrame(loop);
+        };
+        
+        loop();
+    }
+
+    showGameOver() {
+        const ctx = this.ctx;
+        ctx.fillStyle = '#f44336';
+        ctx.font = '32px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('★ VICTORY ★', CANVAS_W / 2, CANVAS_H / 2 - 30);
+        
+        ctx.fillStyle = '#ccc';
+        ctx.font = '16px monospace';
+        ctx.fillText(`You completed all ${this.levelIndex + 1} levels!`, CANVAS_W / 2, CANVAS_H / 2 + 10);
+    }
+}
+
+const canvas = document.getElementById('gameCanvas');
+const game = new Game(canvas);
+game.run();
